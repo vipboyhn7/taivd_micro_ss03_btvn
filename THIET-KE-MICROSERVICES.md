@@ -950,3 +950,218 @@ public class CustomerController {
 - `POST /api/v1/customers/register` đăng ký được khách hàng mới.
 - `PUT /api/v1/customers/login` đăng nhập đúng trả thông tin khách hàng.
 - Đăng nhập sai trả message `email or password incorrect`.
+
+## 10. Đặc tả triển khai Product Service
+
+### 10.1. Khởi tạo project
+
+Tạo project Spring Boot độc lập tên `product-service`, chạy trên port `8082`.
+
+Database PostgreSQL:
+
+```sql
+CREATE DATABASE product_db;
+```
+
+Cấu hình kết nối:
+
+```yaml
+server:
+  port: 8082
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/product_db
+    username: postgres
+    password: postgres
+  jpa:
+    hibernate:
+      ddl-auto: update
+```
+
+### 10.2. Entity `Product`
+
+Entity gồm các trường:
+
+| Trường | Kiểu | Ràng buộc |
+|---|---|---|
+| `id` | `Long` | Primary key, tự tăng |
+| `name` | `String` | Không được để trống |
+| `price` | `BigDecimal` | Lớn hơn `0` |
+| `stockQuantity` | `Integer` | Không được âm |
+
+```java
+@Entity
+@Table(name = "products")
+public class Product {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private String name;
+
+    @Column(nullable = false, precision = 19, scale = 2)
+    private BigDecimal price;
+
+    @Column(nullable = false)
+    private Integer stockQuantity;
+}
+```
+
+Sử dụng `BigDecimal` cho `price` để tránh sai số khi xử lý tiền tệ.
+
+### 10.3. Validation trong `ProductRequestDTO`
+
+Project sử dụng dependency:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-validation</artifactId>
+</dependency>
+```
+
+DTO tạo sản phẩm:
+
+```java
+public class ProductRequestDTO {
+
+    @NotBlank(message = "name không được để trống")
+    private String name;
+
+    @NotNull(message = "price không được để trống")
+    @DecimalMin(value = "0.01", message = "price phải lớn hơn 0")
+    private BigDecimal price;
+
+    @NotNull(message = "stockQuantity không được để trống")
+    @Min(value = 0, message = "stockQuantity không được âm")
+    private Integer stockQuantity;
+}
+```
+
+Controller phải dùng `@Valid`:
+
+```java
+@PostMapping
+public ResponseEntity<ProductResponseDTO> create(
+        @Valid @RequestBody ProductRequestDTO request) {
+    return ResponseEntity.status(HttpStatus.CREATED)
+            .body(productService.create(request));
+}
+```
+
+### 10.4. Repository và service
+
+```java
+public interface ProductRepository extends JpaRepository<Product, Long> {
+}
+```
+
+Service layer chịu trách nhiệm:
+
+1. Lưu sản phẩm mới.
+2. Tìm sản phẩm theo ID.
+3. Lấy danh sách toàn bộ sản phẩm.
+4. Chuyển entity thành `ProductResponseDTO`.
+5. Ném `ProductNotFoundException` nếu không tìm thấy sản phẩm.
+
+### 10.5. Xử lý lỗi validation
+
+`GlobalExceptionHandler` phải bắt `MethodArgumentNotValidException`, lấy các thông báo validation và map vào trường `message` của `ApiResponseError`.
+
+Ví dụ response khi `price = -500`:
+
+```json
+{
+  "timestamp": "2026-10-08T10:30:00",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "price: price phải lớn hơn 0"
+}
+```
+
+Sản phẩm không được lưu vào database khi validation thất bại.
+
+### 10.6. API bắt buộc
+
+#### Tạo sản phẩm
+
+```http
+POST /api/v1/products
+Content-Type: application/json
+```
+
+Request hợp lệ:
+
+```json
+{
+  "name": "Keyboard",
+  "price": 300000,
+  "stockQuantity": 10
+}
+```
+
+Response thành công:
+
+```json
+{
+  "id": 1,
+  "name": "Keyboard",
+  "price": 300000,
+  "stockQuantity": 10
+}
+```
+
+#### Lấy sản phẩm theo ID
+
+```http
+GET /api/v1/products/{id}
+```
+
+Nếu không tìm thấy:
+
+```json
+{
+  "timestamp": "2026-10-08T10:30:00",
+  "status": 404,
+  "error": "Not Found",
+  "message": "Sản phẩm với ID 99 không tồn tại!"
+}
+```
+
+#### Lấy danh sách sản phẩm
+
+```http
+GET /api/v1/products
+```
+
+Response:
+
+```json
+[
+  {
+    "id": 1,
+    "name": "Keyboard",
+    "price": 300000,
+    "stockQuantity": 10
+  }
+]
+```
+
+### 10.7. Tiêu chí nghiệm thu Product Service
+
+- Project có tên `product-service` và chạy trên port `8082`.
+- Kết nối đến PostgreSQL database `product_db`.
+- Entity `Product` có `id`, `name`, `price`, `stockQuantity`.
+- Có dependency `spring-boot-starter-validation`.
+- `name` sử dụng `@NotBlank`.
+- `price` sử dụng `@DecimalMin` và phải lớn hơn `0`.
+- `stockQuantity` sử dụng `@Min(0)` và không được âm.
+- `POST /api/v1/products` tạo sản phẩm hợp lệ.
+- Request có `price = -500` trả HTTP `400 Bad Request`.
+- Lỗi validation được đưa vào trường `message`.
+- Sản phẩm không hợp lệ không được lưu vào database.
+- `GET /api/v1/products/{id}` lấy đúng sản phẩm hoặc trả `404`.
+- `GET /api/v1/products` trả toàn bộ danh sách sản phẩm.
