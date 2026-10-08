@@ -1165,3 +1165,215 @@ Response:
 - Sản phẩm không hợp lệ không được lưu vào database.
 - `GET /api/v1/products/{id}` lấy đúng sản phẩm hoặc trả `404`.
 - `GET /api/v1/products` trả toàn bộ danh sách sản phẩm.
+
+## 11. Đặc tả triển khai Order Service
+
+### 11.1. Khởi tạo project
+
+Tạo project Spring Boot độc lập tên `order-service`, chạy trên port `8083`.
+
+Database PostgreSQL:
+
+```sql
+CREATE DATABASE order_db;
+```
+
+Order Service phải có database riêng, không dùng chung `customer_db` hoặc `product_db`.
+
+### 11.2. Entity `Order`
+
+```java
+@Entity
+@Table(name = "orders")
+public class Order {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private Long customerId;
+
+    @Column(nullable = false)
+    private Long productId;
+
+    @Column(nullable = false)
+    private Integer quantity;
+
+    @Column(nullable = false)
+    private LocalDateTime orderDate;
+
+    @Column(nullable = false, precision = 19, scale = 2)
+    private BigDecimal totalAmount;
+}
+```
+
+### 11.3. Không dùng quan hệ JPA xuyên service
+
+Vì `Customer` và `Product` nằm ở database/service riêng, Order Service không được dùng:
+
+```java
+@ManyToOne
+@OneToOne
+@JoinColumn
+```
+
+Order chỉ lưu các định danh:
+
+```text
+customerId: Long
+productId: Long
+```
+
+Không tạo foreign key hoặc entity relationship đến bảng `customers` hay `products`.
+
+### 11.4. DTO tạo đơn
+
+```java
+public class OrderRequestDTO {
+
+    @NotNull(message = "customerId không được để trống")
+    private Long customerId;
+
+    @NotNull(message = "productId không được để trống")
+    private Long productId;
+
+    @NotNull(message = "quantity không được để trống")
+    @Min(value = 1, message = "quantity phải lớn hơn 0")
+    private Integer quantity;
+}
+```
+
+`quantity <= 0` phải bị từ chối trước khi truy vấn Product Service hoặc lưu database.
+
+### 11.5. Lấy giá từ Product Service
+
+Khi tạo đơn hàng, Order Service gọi API của Product Service:
+
+```http
+GET http://localhost:8082/api/v1/products/{productId}
+```
+
+Ví dụ response từ Product Service:
+
+```json
+{
+  "id": 1,
+  "name": "Keyboard",
+  "price": 300000,
+  "stockQuantity": 10
+}
+```
+
+Order Service tính:
+
+```text
+totalAmount = price * quantity
+```
+
+Sau đó chỉ lưu dữ liệu đơn hàng vào `order_db`. Giá được lấy từ Product Service tại thời điểm tạo đơn.
+
+### 11.6. API bắt buộc
+
+#### Tạo đơn hàng
+
+```http
+POST /api/v1/orders
+Content-Type: application/json
+```
+
+Request:
+
+```json
+{
+  "customerId": 1,
+  "productId": 1,
+  "quantity": 2
+}
+```
+
+Response thành công:
+
+```json
+{
+  "id": 1,
+  "customerId": 1,
+  "productId": 1,
+  "quantity": 2,
+  "orderDate": "2026-10-08T10:30:00",
+  "totalAmount": 600000
+}
+```
+
+#### Lấy đơn hàng theo ID
+
+```http
+GET /api/v1/orders/{id}
+```
+
+Response:
+
+```json
+{
+  "id": 1,
+  "customerId": 1,
+  "productId": 1,
+  "quantity": 2,
+  "orderDate": "2026-10-08T10:30:00",
+  "totalAmount": 600000
+}
+```
+
+### 11.7. Xử lý lỗi
+
+#### Quantity không hợp lệ
+
+Nếu request có `quantity = 0` hoặc số âm, trả HTTP `400 Bad Request`:
+
+```json
+{
+  "timestamp": "2026-10-08T10:30:00",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "quantity: quantity phải lớn hơn 0"
+}
+```
+
+#### Lỗi lưu database
+
+Nếu lưu đơn hàng thất bại, bắt `DataAccessException` và trả HTTP `500 Internal Server Error`:
+
+```json
+{
+  "timestamp": "2026-10-08T10:30:00",
+  "status": 500,
+  "error": "Internal Server Error",
+  "message": "Không thể lưu đơn hàng vào cơ sở dữ liệu"
+}
+```
+
+#### Không lấy được giá sản phẩm
+
+Nếu Product Service không phản hồi hoặc trả dữ liệu không hợp lệ, không lưu đơn hàng và trả lỗi gateway:
+
+```json
+{
+  "timestamp": "2026-10-08T10:30:00",
+  "status": 502,
+  "error": "Bad Gateway",
+  "message": "Không thể lấy giá sản phẩm từ Product Service"
+}
+```
+
+### 11.8. Tiêu chí nghiệm thu Order Service
+
+- Project có tên `order-service` và chạy trên port `8083`.
+- Kết nối PostgreSQL database `order_db`.
+- Entity `Order` có `id`, `customerId`, `productId`, `quantity`, `orderDate`, `totalAmount`.
+- Không dùng `@ManyToOne`, `@OneToOne`, `@JoinColumn` đến Customer hoặc Product.
+- Chỉ lưu `customerId` và `productId` dạng `Long`.
+- `POST /api/v1/orders` nhận `customerId`, `productId`, `quantity`.
+- `quantity <= 0` trả HTTP `400`.
+- Giá được lấy từ Product Service để tính `totalAmount`.
+- `GET /api/v1/orders/{id}` trả thông tin đơn hàng.
+- Lỗi lưu database trả HTTP `500` với định dạng `ApiResponseError`.
