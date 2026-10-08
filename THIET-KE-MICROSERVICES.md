@@ -577,3 +577,376 @@ API Gateway:     8080
 12. Các lỗi giữa service cần được chuẩn hóa bằng mã lỗi rõ ràng.
 
 Thiết kế này đảm bảo ba module độc lập, dễ triển khai riêng, dễ mở rộng và không vi phạm nguyên tắc sở hữu dữ liệu trong kiến trúc microservice.
+
+## 9. Đặc tả triển khai Customer Service
+
+### 9.1. Khởi tạo project
+
+Tạo một project Spring Boot độc lập với tên:
+
+```text
+customer-service
+```
+
+Service chạy trên port `8081`.
+
+Cấu hình PostgreSQL:
+
+```yaml
+server:
+  port: 8081
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/customer_db
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+```
+
+Trong môi trường production nên dùng Flyway hoặc Liquibase thay cho `ddl-auto: update`.
+
+### 9.2. Cấu trúc package
+
+```text
+src/main/java/com/example/customer
+├── CustomerServiceApplication.java
+├── controller
+│   └── CustomerController.java
+├── entity
+│   └── Customer.java
+├── dto
+│   ├── CustomerRequestDTO.java
+│   ├── CustomerResponseDTO.java
+│   └── CustomerLoginDTO.java
+├── repository
+│   └── CustomerRepository.java
+├── service
+│   ├── CustomerService.java
+│   └── CustomerServiceImpl.java
+└── exception
+    ├── ApiResponseError.java
+    ├── CustomerNotFoundException.java
+    └── GlobalExceptionHandler.java
+```
+
+### 9.3. Entity `Customer`
+
+Entity gồm các trường:
+
+| Trường | Kiểu | Ràng buộc |
+|---|---|---|
+| `id` | `Long` | Primary key, tự tăng |
+| `fullName` | `String` | Bắt buộc |
+| `email` | `String` | Bắt buộc, unique |
+| `password` | `String` | Bắt buộc, lưu dạng BCrypt |
+
+```java
+@Entity
+@Table(name = "customers")
+public class Customer {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private String fullName;
+
+    @Column(nullable = false, unique = true)
+    private String email;
+
+    @Column(nullable = false)
+    private String password;
+}
+```
+
+### 9.4. DTO
+
+#### `CustomerRequestDTO`
+
+Dùng khi đăng ký khách hàng mới:
+
+```java
+public class CustomerRequestDTO {
+    private String fullName;
+    private String email;
+    private String password;
+}
+```
+
+#### `CustomerLoginDTO`
+
+Dùng cho chức năng đăng nhập:
+
+```java
+public class CustomerLoginDTO {
+    private String email;
+    private String password;
+}
+```
+
+#### `CustomerResponseDTO`
+
+Không được chứa trường `password`:
+
+```java
+public class CustomerResponseDTO {
+    private Long id;
+    private String fullName;
+    private String email;
+}
+```
+
+### 9.5. Repository
+
+```java
+public interface CustomerRepository
+        extends JpaRepository<Customer, Long> {
+
+    Optional<Customer> findByEmail(String email);
+}
+```
+
+`findByEmail` được dùng để kiểm tra email đăng nhập và kiểm tra email đã tồn tại khi đăng ký.
+
+### 9.6. Xử lý lỗi thống nhất
+
+#### `ApiResponseError`
+
+Class dùng cho mọi lỗi API:
+
+```java
+public class ApiResponseError {
+    private LocalDateTime timestamp;
+    private int status;
+    private String error;
+    private String message;
+}
+```
+
+#### `GlobalExceptionHandler`
+
+Tạo class sử dụng `@RestControllerAdvice` để bắt exception tập trung:
+
+```java
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(CustomerNotFoundException.class)
+    public ResponseEntity<ApiResponseError> handleCustomerNotFound(
+            CustomerNotFoundException exception) {
+        ApiResponseError error = new ApiResponseError(
+                LocalDateTime.now(),
+                HttpStatus.NOT_FOUND.value(),
+                "Not Found",
+                exception.getMessage()
+        );
+
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+    }
+}
+```
+
+Khi không tìm thấy khách hàng, service phải ném `CustomerNotFoundException` thay vì trả về `null` hoặc một response thành công giả.
+
+### 9.7. Service layer
+
+Service layer chịu trách nhiệm:
+
+1. Kiểm tra dữ liệu đầu vào.
+2. Kiểm tra email đã tồn tại.
+3. Mã hóa mật khẩu bằng BCrypt.
+4. Lưu hoặc truy vấn dữ liệu thông qua repository.
+5. Chuyển entity sang DTO.
+6. Ném exception nghiệp vụ khi không tìm thấy dữ liệu.
+
+Ví dụ xử lý đăng ký:
+
+```java
+public CustomerResponseDTO register(CustomerRequestDTO request) {
+    if (customerRepository.findByEmail(request.getEmail()).isPresent()) {
+        throw new IllegalArgumentException("Email already exists");
+    }
+
+    Customer customer = new Customer();
+    customer.setFullName(request.getFullName());
+    customer.setEmail(request.getEmail());
+    customer.setPassword(passwordEncoder.encode(request.getPassword()));
+
+    Customer savedCustomer = customerRepository.save(customer);
+    return customerMapper.toResponse(savedCustomer);
+}
+```
+
+### 9.8. API bắt buộc
+
+#### Đăng ký khách hàng
+
+```http
+POST /api/v1/customers/register
+Content-Type: application/json
+```
+
+Request:
+
+```json
+{
+  "fullName": "Nguyen Van A",
+  "email": "a@example.com",
+  "password": "secret123"
+}
+```
+
+Quy trình:
+
+1. Nhận `CustomerRequestDTO`.
+2. Kiểm tra dữ liệu hợp lệ.
+3. Kiểm tra email chưa tồn tại.
+4. Mã hóa password bằng BCrypt.
+5. Lưu khách hàng vào `customer_db`.
+6. Trả về `CustomerResponseDTO`.
+
+Response thành công:
+
+```json
+{
+  "id": 1,
+  "fullName": "Nguyen Van A",
+  "email": "a@example.com"
+}
+```
+
+Không được trả password trong response.
+
+#### Lấy khách hàng theo ID
+
+```http
+GET /api/v1/customers/{id}
+```
+
+Nếu tìm thấy, trả về `CustomerResponseDTO`:
+
+```json
+{
+  "id": 1,
+  "fullName": "Nguyen Van A",
+  "email": "a@example.com"
+}
+```
+
+Nếu không tìm thấy, phải ném exception để `GlobalExceptionHandler` xử lý và trả HTTP `404`.
+
+Ví dụ với ID `99`:
+
+```json
+{
+  "timestamp": "2024-03-20T10:30:00",
+  "status": 404,
+  "error": "Not Found",
+  "message": "Khách hàng với ID 99 không tồn tại!"
+}
+```
+
+#### Đăng nhập
+
+Theo yêu cầu, endpoint đăng nhập sử dụng:
+
+```http
+PUT /api/v1/customers/login
+Content-Type: application/json
+```
+
+Request:
+
+```json
+{
+  "email": "a@example.com",
+  "password": "secret123"
+}
+```
+
+Quy trình:
+
+1. Tìm khách hàng theo email.
+2. So sánh password nhập vào với password BCrypt đã lưu.
+3. Nếu đúng, trả về `CustomerResponseDTO`.
+4. Nếu sai email hoặc password, trả thông báo:
+
+```text
+email or password incorrect
+```
+
+Response đăng nhập thành công:
+
+```json
+{
+  "id": 1,
+  "fullName": "Nguyen Van A",
+  "email": "a@example.com"
+}
+```
+
+Response đăng nhập thất bại nên sử dụng lỗi `401 Unauthorized`:
+
+```json
+{
+  "timestamp": "2026-10-08T10:30:00",
+  "status": 401,
+  "error": "Unauthorized",
+  "message": "email or password incorrect"
+}
+```
+
+### 9.9. Controller mẫu
+
+```java
+@RestController
+@RequestMapping("/api/v1/customers")
+public class CustomerController {
+
+    private final CustomerService customerService;
+
+    @PostMapping("/register")
+    public ResponseEntity<CustomerResponseDTO> register(
+            @RequestBody CustomerRequestDTO request) {
+        return ResponseEntity
+                .status(HttpStatus.CREATED)
+                .body(customerService.register(request));
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<CustomerResponseDTO> findById(
+            @PathVariable Long id) {
+        return ResponseEntity.ok(customerService.findById(id));
+    }
+
+    @PutMapping("/login")
+    public ResponseEntity<CustomerResponseDTO> login(
+            @RequestBody CustomerLoginDTO request) {
+        return ResponseEntity.ok(customerService.login(request));
+    }
+}
+```
+
+### 9.10. Tiêu chí nghiệm thu Customer Service
+
+- Project có tên `customer-service` và chạy trên port `8081`.
+- Kết nối thành công đến PostgreSQL database `customer_db`.
+- Entity `Customer` có đầy đủ `id`, `fullName`, `email`, `password`.
+- Email được cấu hình unique.
+- Password được mã hóa bằng BCrypt trước khi lưu.
+- `CustomerResponseDTO` không chứa password.
+- `GET /api/v1/customers/{id}` trả `404` khi ID không tồn tại.
+- Response lỗi có đủ `timestamp`, `status`, `error`, `message`.
+- `POST /api/v1/customers/register` đăng ký được khách hàng mới.
+- `PUT /api/v1/customers/login` đăng nhập đúng trả thông tin khách hàng.
+- Đăng nhập sai trả message `email or password incorrect`.
